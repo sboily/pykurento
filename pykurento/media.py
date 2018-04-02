@@ -23,7 +23,7 @@ class MediaObject(object):
     else:
       logger.debug("Creating new %s", self.__class__.__name__)
       self.id = self.get_transport().create(self.__class__.__name__, **args)
-  
+
   def get_transport(self):
     return self.parent.get_transport()
 
@@ -38,6 +38,9 @@ class MediaObject(object):
     def _callback(value):
       fn(value, self)
     return self.get_transport().subscribe(self.id, event, _callback)
+
+  def unsubscribe(self, subscription_id):
+    self.get_transport().unsubscribe(self.id, subscription_id)
 
   def release(self):
     return self.get_transport().release(self.id)
@@ -135,12 +138,43 @@ class SdpEndpoint(SessionEndpoint):
   def get_remote_session_descriptor(self):
     return self.invoke("getRemoteSessionDescriptor")
 
+  def add_ice_candidate(self, ice_candidate_data):
+      self.invoke("addIceCandidate", candidate=ice_candidate_data)
 
-class RtpEndpoint(SdpEndpoint):
+  def gather_candidates(self):
+      self.invoke("gatherCandidates")
+
+  def on_ice_component_state_change_event(self, fn):
+    return self.subscribe("IceComponentStateChange", fn)
+
+  def on_ice_candidate_found_event(self, fn):
+    return self.subscribe("IceCandidateFound", fn)
+
+  def on_ice_gathering_done_event(self, fn):
+    return self.subscribe("IceGatheringDone", fn)
+
+  def on_new_candidate_pair_selected_event(self, fn):
+    return self.subscribe("NewCandidatePairSelected", fn)
+
+  def on_data_channgel_open_event(self, fn):
+    return self.subscribe("DataChannelOpen", fn)
+
+  def on_data_channgel_close_event(self, fn):
+    return self.subscribe("DataChannelClose", fn)
+
+
+class BaseRtpEndpoint(SdpEndpoint):
+  def on_connection_state_changed_event(self, fn):
+    return self.subscribe("ConnectionStateChanged", fn)
+
+  def on_media_state_changed_event(self, fn):
+    return self.subscribe("MediaStateChanged", fn)
+
+
+class RtpEndpoint(BaseRtpEndpoint):
   pass
 
-  
-class WebRtcEndpoint(SdpEndpoint):
+class WebRtcEndpoint(BaseRtpEndpoint):
   pass
 
 

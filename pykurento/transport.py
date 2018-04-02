@@ -3,6 +3,10 @@ import json
 import time
 import threading
 import logging
+import os
+import sys
+
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,7 @@ class Timeout(object):
 
   def __enter__(self):
     self.timer = threading.Timer(self.seconds, self.handle_timeout)
-  
+
   def __exit__(self, type, value, traceback):
     if self.timer:
       self.timer.cancel()
@@ -45,6 +49,7 @@ class KurentoTransport(object):
     self.session_id = None
     self.pending_operations = {}
     self.subscriptions = {}
+    self.subscriptions_by_event_type = defaultdict(list)
     self.stopped = False
 
     self.thread = threading.Thread(target=self._run_thread)
@@ -58,11 +63,11 @@ class KurentoTransport(object):
 
   def _check_connection(self):
     if not self.ws.connected:
-      logger.info("Kurent Client websocket is not connected, reconnecting")
+      logger.info("Kurento Client websocket is not connected, reconnecting")
       try:
         with Timeout(seconds=5):
           self.ws.connect(self.url)
-          logger.info("Kurent Client websocket connected!")
+          logger.info("Kurento Client websocket connected!")
       except TimeoutException:
         # modifying this exception so we can differentiate in the receiver thread
         raise KurentoTransportException("Timeout: Kurento Client websocket connection timed out")
@@ -76,7 +81,12 @@ class KurentoTransport(object):
       except TimeoutException:
         logger.debug("WS Receiver Timeout")
       except Exception as ex:
-        logger.error("WS Receiver Thread %s: %s" % (type(ex), str(ex)))
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+
+        logger.error("WS Receiver Thread %s: %s in file %s:%s" %
+                                    (exc_type, str(ex), fname, exc_tb.tb_lineno))
+
 
   def _next_id(self):
     self.current_id += 1
@@ -90,12 +100,18 @@ class KurentoTransport(object):
       if (resp['method'] == 'onEvent'
           and 'params' in resp
           and 'value' in resp['params']
-          and 'subscription' in resp['params']
-          and resp['params']['subscription'] in self.subscriptions):
-        sub_id = resp['params']['subscription']
-        fn = self.subscriptions[sub_id]
-        self.session_id = resp['params']['sessionId'] if 'sessionId' in resp['params'] else self.session_id
-        fn(resp["params"]["value"])
+          and 'data' in resp['params']['value']
+          and 'type' in resp['params']['value']['data']
+          and resp['params']['value']['data']['type'] in self.subscriptions_by_event_type.keys()):
+
+        event_source = resp['params']['value']['data']['source']
+        event_type = resp['params']['value']['data']['type']
+        event_subscriptions = self.subscriptions_by_event_type[event_type]
+
+        for sub_id in event_subscriptions:
+          _, fn = self.subscriptions[sub_id]
+          self.session_id = resp['params']['sessionId'] if 'sessionId' in resp['params'] else self.session_id
+          fn(resp["params"]["value"])
 
     else:
       if 'result' in resp and 'sessionId' in resp['result']:
@@ -116,7 +132,7 @@ class KurentoTransport(object):
     resp_key = "%d_response" % request["id"]
 
     self.pending_operations[req_key] = request
-    
+
     self._check_connection()
 
     logger.debug("sending message:  %s" % json.dumps(request))
@@ -126,7 +142,7 @@ class KurentoTransport(object):
       time.sleep(1)
 
     resp = self.pending_operations[resp_key]
-    
+
     del self.pending_operations[req_key]
     del self.pending_operations[resp_key]
 
@@ -145,12 +161,17 @@ class KurentoTransport(object):
 
   def subscribe(self, object_id, event_type, fn):
     subscription_id = self._rpc("subscribe", object=object_id, type=event_type)
-    self.subscriptions[subscription_id] = fn
+    self.subscriptions[subscription_id] = (event_type, fn,)
+    self.subscriptions_by_event_type[event_type].append(subscription_id)
     return subscription_id
 
-  def unsubscribe(self, subscription_id):
+  def unsubscribe(self, object_id, subscription_id):
+    event_type, _ = self.subscriptions[subscription_id]
+    event_subscriptions = self.subscriptions_by_event_type[event_type]
+    event_subscriptions.remove(subscription_id)
+
     del self.subscriptions[subscription_id]
-    return self._rpc("unsubscribe", subscription=subscription_id)
+    return self._rpc("unsubscribe", object=object_id, subscription=subscription_id)
 
   def release(self, object_id):
     return self._rpc("release", object=object_id)
