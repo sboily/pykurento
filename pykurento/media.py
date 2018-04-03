@@ -1,5 +1,8 @@
 import logging
 
+from functools import wraps
+from inspect import getcallargs
+
 logger = logging.getLogger(__name__)
 
 # This is the object graph as described at http://www.kurento.org/docs/5.0.3/mastering/kurento_API.html
@@ -7,6 +10,24 @@ logger = logging.getLogger(__name__)
 #                   MediaObject
 # Hub               MediaElement                MediaPipeline
 #          HubPort    Endpoint    Filter
+
+def grab_session_id(f):
+  '''Decorator to grab session id from kurento response'''
+
+  @wraps(f)
+  def decorator(*args, **kwargs):
+    call_args = getcallargs(f, *args, **kwargs)
+
+    result = f(*args, **kwargs)
+    if isinstance(result, tuple):
+      session_id, result = result
+
+      if 'self' in call_args and not call_args['self'].session_id:
+        call_args['self'].session_id = session_id
+
+    return result
+  return decorator
+
 
 class MediaType(object):
   AUDIO = "AUDIO"
@@ -20,9 +41,10 @@ class MediaObject(object):
     if 'id' in args:
       logger.debug("Creating existing %s with id=%s", self.__class__.__name__, args['id'])
       self.id = args['id']
+      self.session_id = None
     else:
       logger.debug("Creating new %s", self.__class__.__name__)
-      self.id = self.get_transport().create(self.__class__.__name__, **args)
+      self.session_id, self.id = self.get_transport().create(self.__class__.__name__, **args)
 
   def get_transport(self):
     return self.parent.get_transport()
@@ -31,17 +53,21 @@ class MediaObject(object):
     return self.parent.get_pipeline()
 
   # todo: remove arguments that have a value of None to let optional params work seamlessly
+  @grab_session_id
   def invoke(self, method, **args):
     return self.get_transport().invoke(self.id, method, **args)
 
+  @grab_session_id
   def subscribe(self, event, fn):
     def _callback(value):
       fn(value, self)
     return self.get_transport().subscribe(self.id, event, _callback)
 
+  @grab_session_id
   def unsubscribe(self, subscription_id):
     self.get_transport().unsubscribe(self.id, subscription_id)
 
+  @grab_session_id
   def release(self):
     return self.get_transport().release(self.id)
 

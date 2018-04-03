@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 
+from Queue import Queue
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class KurentoTransportException(Exception):
 
 
 class KurentoTransport(object):
-  def __init__(self, url):
+  def __init__(self, url, **kwargs):
     logger.debug("Creating new KurentoTransport with url: %s" % url)
     self.url = url
     self.ws = websocket.WebSocket()
@@ -55,6 +56,15 @@ class KurentoTransport(object):
     self.thread = threading.Thread(target=self._run_thread)
     self.thread.daemon = True
     self.thread.start()
+
+    # queue for messages received from Kurento; this is to decouple
+    # message handing from the pykurento transport message receiving
+    # thread (and avoid potential deadlock);
+    self.kms_queue = Queue(kwargs.get('kms_queue_size', 64))
+
+    self.messaging_thread = threading.Thread(target=self._process_messages)
+    self.messaging_thread.daemon = True
+    self.messaging_thread.start()
 
   def __del__(self):
     logger.debug("Destroying KurentoTransport with url: %s" % self.url)
@@ -77,7 +87,14 @@ class KurentoTransport(object):
       try:
         self._check_connection()
         with Timeout(seconds=1):
-          self._on_message(self.ws.recv())
+          msg = self.ws.recv()
+          resp = json.loads(msg)
+          if 'result' in resp and 'sessionId' in resp['result']:
+            self.session_id = resp['result']['sessionId']
+            self.pending_operations["%d_response" % resp["id"]] = resp
+          else:
+            self.kms_queue.put(msg)
+
       except TimeoutException:
         logger.debug("WS Receiver Timeout")
       except Exception as ex:
@@ -87,6 +104,18 @@ class KurentoTransport(object):
         logger.error("WS Receiver Thread %s: %s in file %s:%s" %
                                     (exc_type, str(ex), fname, exc_tb.tb_lineno))
 
+  def _process_messages(self):
+      '''Process messages asynchroneously from receiver thread'''
+      while not self.stopped:
+        try:
+          self._on_message(self.kms_queue.get())
+          self.kms_queue.task_done()
+
+        except Exception as ex:
+          exc_type, exc_obj, exc_tb = sys.exc_info()
+          fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+          logger.error("KMS Messaging Thread %s: %s in file %s:%s" %
+                                    (exc_type, str(ex), fname, exc_tb.tb_lineno))
 
   def _next_id(self):
     self.current_id += 1
@@ -112,11 +141,6 @@ class KurentoTransport(object):
           _, fn = self.subscriptions[sub_id]
           self.session_id = resp['params']['sessionId'] if 'sessionId' in resp['params'] else self.session_id
           fn(resp["params"]["value"])
-
-    else:
-      if 'result' in resp and 'sessionId' in resp['result']:
-        self.session_id = resp['result']['sessionId']
-      self.pending_operations["%d_response" % resp["id"]] = resp
 
   def _rpc(self, rpc_type, **args):
     if self.session_id:
@@ -148,8 +172,14 @@ class KurentoTransport(object):
 
     if 'error' in resp:
       raise KurentoTransportException(resp['error']['message'] if 'message' in resp['error'] else 'Unknown Error', resp)
-    elif 'result' in resp and 'value' in resp['result']:
-      return resp['result']['value']
+    elif 'result' in resp:
+      assert 'sessionId' in resp['result'], 'KMS should return sessionId as part of the response'
+
+      session_id = resp['result']['sessionId']
+      value = resp['result'].get('value')
+      result = (session_id, value,) if value else session_id
+
+      return result
     else:
       return None # just to be explicit
 
@@ -160,10 +190,10 @@ class KurentoTransport(object):
     return self._rpc("invoke", object=object_id, operation=operation, operationParams=args)
 
   def subscribe(self, object_id, event_type, fn):
-    subscription_id = self._rpc("subscribe", object=object_id, type=event_type)
+    session_id, subscription_id = self._rpc("subscribe", object=object_id, type=event_type)
     self.subscriptions[subscription_id] = (event_type, fn,)
     self.subscriptions_by_event_type[event_type].append(subscription_id)
-    return subscription_id
+    return session_id, subscription_id
 
   def unsubscribe(self, object_id, subscription_id):
     event_type, _ = self.subscriptions[subscription_id]
