@@ -1,6 +1,11 @@
 # Pykurento
 
-##We are no longer actively developing this project. Sorry to those who were interested. Feel free to fork.
+## About This Fork
+This fork is to support KMS 6.7.X and seems to support new JSON RPC (in general). No examples were updated, only the core code.
+What was implemented so far:
+*  Everything required for Trickle ICE exchange
+*  Better SessionId handling for multisession RPC exchange with KMS
+*  Asynchroneous (from websocket receiver thread) KMS message handling to avoid deadlock when doing RPC calls from withing KMS event handler
 
 
 Pykurento is a [Kurento](http://www.kurento.org/docs/5.0.3/what_is_kurento.html) client written in python and uses the [websocket-client](https://github.com/liris/websocket-client) library for its transport layer.
